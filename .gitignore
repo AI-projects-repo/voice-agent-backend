@@ -1,0 +1,12 @@
+recordings/
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+.env.local
+*.egg-info/
+.eggs/
+dist/
+build/
