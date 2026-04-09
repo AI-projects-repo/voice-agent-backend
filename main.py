@@ -3,6 +3,7 @@ import logging
 import os
 import uuid
 import json
+from contextlib import asynccontextmanager
 
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaRecorder, MediaRelay
@@ -17,6 +18,8 @@ import vosk
 RECORDINGS_DIR = "recordings"
 FRAME_RATE = 16000
 model = None
+model_name = "vosk-model-small-en-us-0.15"
+user_text = ""
 logger = logging.getLogger("uvicorn.error")
 relay = MediaRelay()
 
@@ -24,7 +27,32 @@ pcs: set[RTCPeerConnection] = set()
 peer_recorders: dict[RTCPeerConnection, MediaRecorder] = {}
 peer_transcribe_tasks: dict[RTCPeerConnection, asyncio.Task] = {}
 
-app = FastAPI(title="RTC Audio Server")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    logger.info("Recordings directory ready: %s", RECORDINGS_DIR)
+    global model
+    global user_text
+    model = vosk.Model(model_name)
+    logger.info("Vosk model loaded")
+    yield
+    for pc in list(pcs):
+        rec = peer_recorders.get(pc)
+        if rec:
+            try:
+                await rec.stop()
+            except Exception as e:
+                logger.warning("Recorder stop on shutdown: %s", e)
+            peer_recorders.pop(pc, None)
+        task = peer_transcribe_tasks.pop(pc, None)
+        if task:
+            task.cancel()
+        await pc.close()
+    pcs.clear()
+    logger.info("Shutdown: all peer connections closed")
+
+
+app = FastAPI(title="RTC Audio Server", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,15 +61,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup():
-    os.makedirs(RECORDINGS_DIR, exist_ok=True)
-    logger.info("Recordings directory ready: %s", RECORDINGS_DIR)
-    global model
-    model = vosk.Model("vosk-model-small-en-us-0.15")
-    logger.info("Vosk model loaded")
 
 
 async def transcribe_audio_track(track, pc_id: str):
@@ -56,6 +75,7 @@ async def transcribe_audio_track(track, pc_id: str):
     recognizer.SetWords(True)
     resampler = AudioResampler(format="s16", layout="mono", rate=FRAME_RATE)
     logger.warning("Transcription task started for %s", pc_id)
+    global user_text
 
     try:
         while True:
@@ -71,18 +91,14 @@ async def transcribe_audio_track(track, pc_id: str):
                 if recognizer.AcceptWaveform(pcm_bytes):
                     result = json.loads(recognizer.Result())
                     text = result.get("text", "").strip()
-                    if text:
-                        logger.warning("Recognized (%s): %s", pc_id, text)
+                    user_text += text
                 else:
                     partial = json.loads(recognizer.PartialResult()).get("partial", "").strip()
-                    if partial:
-                        logger.warning("Partial (%s): %s", pc_id, partial)
+                    user_text += partial
     except MediaStreamError:
         final_text = json.loads(recognizer.FinalResult()).get("text", "").strip()
         if final_text:
-            logger.warning("Final (%s): %s", pc_id, final_text)
-        else:
-            logger.warning("Final (%s): <empty>", pc_id)
+            user_text += final_text
     except Exception:
         logger.exception("Transcription task failed for %s", pc_id)
 
@@ -110,12 +126,10 @@ async def offer(request: Request):
             # Relay creates independent proxy tracks for recorder and transcriber.
             recorder_track = relay.subscribe(track)
             stt_track = relay.subscribe(track)
-            recorder.addTrack(recorder_track)
-            logger.info("Audio track added for %s", pc_id)
+            #recorder.addTrack(recorder_track)
             peer_transcribe_tasks[pc] = asyncio.create_task(transcribe_audio_track(stt_track, pc_id))
 
 
-        @track.on("ended")
         async def on_ended():
             logger.info("Track ended for %s", pc_id)
             try:
@@ -127,15 +141,15 @@ async def offer(request: Request):
                 task.cancel()
             peer_recorders.pop(pc, None)
             pcs.discard(pc)
+        track.on("ended", on_ended)
 
-    @pc.on("track")
-    def _on_track(track):
-        on_track(track)
+    pc.on("track", on_track)
 
-    @pc.on("connectionstatechange")
     async def on_connectionstatechange():
         logger.info("Connection state %s for %s", pc.connectionState, pc_id)
         if pc.connectionState in ("failed", "closed", "disconnected"):
+            logger.info(f"Recorded stoped and user text is {user_text}")
+            user_text = ""
             rec = peer_recorders.get(pc)
             if rec:
                 try:
@@ -147,6 +161,7 @@ async def offer(request: Request):
             if task:
                 task.cancel()
             pcs.discard(pc)
+    pc.on("connectionstatechange", on_connectionstatechange)
 
     try:
         await pc.setRemoteDescription(offer)
@@ -169,24 +184,6 @@ async def offer(request: Request):
         pcs.discard(pc)
         peer_recorders.pop(pc, None)
         return JSONResponse(status_code=500, content={"error": str(e)})
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    for pc in list(pcs):
-        rec = peer_recorders.get(pc)
-        if rec:
-            try:
-                await rec.stop()
-            except Exception as e:
-                logger.warning("Recorder stop on shutdown: %s", e)
-            peer_recorders.pop(pc, None)
-        task = peer_transcribe_tasks.pop(pc, None)
-        if task:
-            task.cancel()
-        await pc.close()
-    pcs.clear()
-    logger.info("Shutdown: all peer connections closed")
 
 
 if __name__ == "__main__":
