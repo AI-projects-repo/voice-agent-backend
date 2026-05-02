@@ -15,7 +15,7 @@ from channel_messanger import fetch_chat_and_reply
 relay = MediaRelay()
 RECORDINGS_DIR = "recordings"
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 def get_peer_connection(
     transcriber_model: vosk.Model,

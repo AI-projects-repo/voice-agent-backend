@@ -9,7 +9,7 @@ from av import AudioResampler
 
 from aiortc.mediastreams import MediaStreamError
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 def merge_recognizer_final(recognizer: vosk.KaldiRecognizer, pc_id: str, peer_transcripts: dict[str, str]) -> None:
@@ -96,7 +96,7 @@ async def transcribe_audio_track(
     except MediaStreamError:
         logger.error("MediaStreamError for %s", pc_id)
     except Exception:
-        logger.error("Transcription task failed for %s", pc_id)
+        logger.exception("Transcription task failed for %s", pc_id)
     finally:
         merge_recognizer_final(recognizer, pc_id, peer_transcripts)
         peer_stt_active.pop(pc_id, None)
