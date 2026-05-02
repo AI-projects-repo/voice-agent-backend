@@ -1,0 +1,22 @@
+services:
+  rtc-audio-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8080:8080
+    volumes:
+      - recordings:/app/recordings
+    environment:
+      - CHAT_UPSTREAM_URL=http://chat-api:8000/chat
+      - CHAT_UPSTREAM_READ_TIMEOUT=120
+      - CHAT_UPSTREAM_TIMEOUT=120
+      - CHAT_UPSTREAM_TIMEOUT_WRITE=120
+    networks:
+      - agent-network
+
+volumes:
+  recordings:
+networks:
+  agent-network:
+    external: true
