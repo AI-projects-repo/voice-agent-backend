@@ -5,7 +5,7 @@ import os
 
 from httpx import AsyncClient, Timeout
 
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 # Upstream /chat may stream or block on LLMs; default read matches long generation.
 CHAT_UPSTREAM_READ_TIMEOUT = float(os.environ.get("CHAT_UPSTREAM_READ_TIMEOUT", "120"))
@@ -60,7 +60,7 @@ async def fetch_chat_and_reply(
     logger.info("stop_audio signal [%s]; transcript length=%d", pc_id, len(transcript))
     try:
         res = await async_requests_client.get(
-            "http://localhost:8000/chat",
+            "http://chat-api:8000/chat",
             params={"message": transcript},
             timeout=CHAT_UPSTREAM_TIMEOUT,
         )
