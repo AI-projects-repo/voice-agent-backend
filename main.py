@@ -1,9 +1,23 @@
 import asyncio
 import logging
 import os
-import json
-from httpx import AsyncClient, Timeout
 from contextlib import asynccontextmanager
+
+
+def _configure_logging() -> None:
+    """Ensure app loggers (getLogger(__name__)) emit INFO when run via `uvicorn main:app` (no __main__ block)."""
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        root.addHandler(handler)
+
+
+_configure_logging()
 
 import vosk
 from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -18,7 +32,7 @@ RECORDINGS_DIR = "recordings"
 FRAME_RATE = 16000
 transcriber_model = None
 model_name = "vosk-model-small-en-us-0.15"
-logger = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 pcs: set[RTCPeerConnection] = set()
 peer_recorders: dict[RTCPeerConnection, MediaRecorder] = {}
