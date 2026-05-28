@@ -29,7 +29,8 @@ def get_peer_connection(
     peer_stt_active: dict[str, bool], peer_stt_flush_complete: dict[str, asyncio.Future],
     pcs: set[RTCPeerConnection],
     recordings_dir: str,
-    chat_upstream_read_timeout: float
+    chat_upstream_read_timeout: float,
+    peer_reply_tasks: dict[str, asyncio.Task]
 ) -> Tuple[RTCPeerConnection, str]:
     # create a new peer connection and assign a unique ID
     pc = RTCPeerConnection()
@@ -79,6 +80,9 @@ def get_peer_connection(
             peer_transcripts.pop(pc_id, None)
             peer_stt_flush_request.pop(pc_id, None)
             peer_stt_active.pop(pc_id, None)
+            old_task = peer_reply_tasks.pop(pc_id, None)
+            if old_task:
+                old_task.cancel()
             _f = peer_stt_flush_complete.pop(pc_id, None)
             if _f is not None and not _f.done():
                 _f.cancel()
@@ -110,6 +114,9 @@ def get_peer_connection(
             peer_transcripts.pop(pc_id, None)
             peer_stt_flush_request.pop(pc_id, None)
             peer_stt_active.pop(pc_id, None)
+            task = peer_reply_tasks.pop(pc_id, None)
+            if task:
+                task.cancel()
             _f = peer_stt_flush_complete.pop(pc_id, None)
             if _f is not None and not _f.done():
                 _f.cancel()
@@ -152,8 +159,11 @@ def get_peer_connection(
             except json.JSONDecodeError:
                 logger.warning("DataChannel invalid JSON from client [%s]: %s", pc_id, raw[:200])
                 return
-            if payload.get("type") == "signal" and payload.get("action") == "stop_audio":
-                asyncio.create_task(
+            if payload.get("type") == "signal" and payload.get("action") == "resume_audio":
+                old_task = peer_reply_tasks.pop(pc_id, None)
+                if old_task:
+                    old_task.cancel()
+                peer_reply_tasks[pc_id] = asyncio.create_task(
                     fetch_chat_and_reply(
                         pc_id,
                         channel,
@@ -164,8 +174,14 @@ def get_peer_connection(
                         peer_stt_flush_complete,
                         peer_transcripts,
                         chat_upstream_read_timeout,
+                        peer_reply_tasks,
                     )
                 )
+                return
+            elif payload.get("type") == "signal" and payload.get("action") == "interrupt_audio":
+                task = peer_reply_tasks.pop(pc_id, None)
+                if task:
+                    task.cancel()
                 return
             logger.debug("DataChannel message from client [%s]: %s", pc_id, raw[:500])
 
