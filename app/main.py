@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Dict
 
 from app.core.config import Settings
 settings = Settings()
@@ -42,14 +43,15 @@ async_requests_client = None
 logger = logging.getLogger(__name__)
 
 pcs: set[RTCPeerConnection] = set()
-peer_recorders: dict[RTCPeerConnection, MediaRecorder] = {}
-peer_transcribe_tasks: dict[RTCPeerConnection, asyncio.Task] = {}
-peer_data_channels: dict[RTCPeerConnection, object] = {}
-peer_transcripts: dict[str, str] = {}
+peer_recorders: Dict[RTCPeerConnection, MediaRecorder] = {}
+peer_transcribe_tasks: Dict[RTCPeerConnection, asyncio.Task] = {}
+peer_data_channels: Dict[RTCPeerConnection, object] = {}
+peer_transcripts: Dict[str, str] = {}
 # STT flush: DataChannel stop_audio sets the Event; transcriber calls FinalResult then completes the Future.
-peer_stt_flush_request: dict[str, asyncio.Event] = {}
-peer_stt_flush_complete: dict[str, asyncio.Future] = {}
-peer_stt_active: dict[str, bool] = {}
+peer_stt_flush_request: Dict[str, asyncio.Event] = {}
+peer_stt_flush_complete: Dict[str, asyncio.Future] = {}
+peer_stt_active: Dict[str, bool] = {}
+peer_reply_tasks: Dict[str, asyncio.Task] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -65,6 +67,11 @@ async def lifespan(app: FastAPI):
     async_requests_client = AsyncClient()
     logger.info("Async requests client initialized")
     yield
+    for task in peer_reply_tasks.values():
+        if task:
+            task.cancel()
+    peer_reply_tasks.clear()
+    logger.info("Peer reply tasks cleared")
     await async_requests_client.aclose()
     logger.info("Async requests client closed")
     for pc in list(pcs):
@@ -123,6 +130,7 @@ async def offer(request: Request):
         pcs,
         settings.recordings_dir,
         settings.chat_upstream_read_timeout,
+        peer_reply_tasks,
     )
     peer_stt_flush_request[pc_id] = asyncio.Event()
 
@@ -160,6 +168,10 @@ async def offer(request: Request):
         peer_data_channels.pop(pc, None)
         peer_stt_flush_request.pop(pc_id, None)
         peer_stt_active.pop(pc_id, None)
+        task = peer_reply_tasks.pop(pc_id, None)
+        if task:
+            task.cancel()
+        logger.info("Peer reply task cancelled")
         _f = peer_stt_flush_complete.pop(pc_id, None)
         if _f is not None and not _f.done():
             _f.cancel()
