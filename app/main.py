@@ -52,6 +52,7 @@ peer_stt_flush_request: Dict[str, asyncio.Event] = {}
 peer_stt_flush_complete: Dict[str, asyncio.Future] = {}
 peer_stt_active: Dict[str, bool] = {}
 peer_reply_tasks: Dict[str, asyncio.Task] = {}
+peer_reply_epoch: Dict[str, int] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -131,6 +132,7 @@ async def offer(request: Request):
         settings.recordings_dir,
         settings.chat_upstream_read_timeout,
         peer_reply_tasks,
+        peer_reply_epoch
     )
     peer_stt_flush_request[pc_id] = asyncio.Event()
 
