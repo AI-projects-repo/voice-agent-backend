@@ -5,7 +5,7 @@ import os
 import json
 import vosk
 
-from typing import Tuple
+from typing import Tuple, Dict
 from app.transcriber import transcribe_audio_track
 from aiortc.contrib.media import MediaRelay, MediaRecorder
 from aiortc import RTCPeerConnection
@@ -22,21 +22,26 @@ def get_peer_connection(
     voice_model,
     async_requests_client: AsyncClient,
     frame_rate: int,
-    peer_data_channels: dict[RTCPeerConnection, object],
-    peer_recorders: dict[RTCPeerConnection, MediaRecorder],
-    peer_transcribe_tasks: dict[RTCPeerConnection, asyncio.Task],
-    peer_transcripts: dict[str, str], peer_stt_flush_request: dict[str, asyncio.Event],
-    peer_stt_active: dict[str, bool], peer_stt_flush_complete: dict[str, asyncio.Future],
+    peer_data_channels: Dict[RTCPeerConnection, object],
+    peer_recorders: Dict[RTCPeerConnection, MediaRecorder],
+    peer_transcribe_tasks: Dict[RTCPeerConnection, asyncio.Task],
+    peer_transcripts: Dict[str, str],
+    peer_stt_flush_request: Dict[str, asyncio.Event],
+    peer_stt_active: Dict[str, bool],
+    peer_stt_flush_complete: Dict[str, asyncio.Future],
     pcs: set[RTCPeerConnection],
     recordings_dir: str,
     chat_upstream_read_timeout: float,
-    peer_reply_tasks: dict[str, asyncio.Task]
+    peer_reply_tasks: Dict[str, asyncio.Task],
+    peer_reply_epoch: Dict[str, int],
 ) -> Tuple[RTCPeerConnection, str]:
     # create a new peer connection and assign a unique ID
     pc = RTCPeerConnection()
     pc_id = str(uuid.uuid4())
     record_path = os.path.join(recordings_dir, f"audio_{pc_id}.wav")
     recorder = MediaRecorder(record_path)
+    peer_reply_epoch[pc_id] = peer_reply_epoch.get(pc_id, 0) + 1
+
 
     def on_ice_connection_state_change():
         logger.info(
@@ -87,6 +92,8 @@ def get_peer_connection(
             if _f is not None and not _f.done():
                 _f.cancel()
             pcs.discard(pc)
+            # clear reply epoch for this session
+            peer_reply_epoch.pop(pc_id, None)
         track.on("ended", on_ended)
     
     async def on_connectionstatechange():
@@ -121,6 +128,8 @@ def get_peer_connection(
             if _f is not None and not _f.done():
                 _f.cancel()
             pcs.discard(pc)
+            # clear reply epoch for this session
+            peer_reply_epoch.pop(pc_id, None)
 
     # Offerer (browser) creates data channel; answerer receives it here. Register
     # before setRemoteDescription so the event is never missed.
@@ -160,6 +169,7 @@ def get_peer_connection(
                 logger.warning("DataChannel invalid JSON from client [%s]: %s", pc_id, raw[:200])
                 return
             if payload.get("type") == "signal" and payload.get("action") == "resume_audio":
+                peer_reply_epoch[pc_id] = peer_reply_epoch.get(pc_id, 0) + 1
                 old_task = peer_reply_tasks.pop(pc_id, None)
                 if old_task:
                     old_task.cancel()
@@ -175,10 +185,13 @@ def get_peer_connection(
                         peer_transcripts,
                         chat_upstream_read_timeout,
                         peer_reply_tasks,
+                        peer_reply_epoch,
+                        peer_reply_epoch[pc_id],
                     )
                 )
                 return
             elif payload.get("type") == "signal" and payload.get("action") == "interrupt_audio":
+                peer_reply_epoch[pc_id] = peer_reply_epoch.get(pc_id, 0) + 1
                 task = peer_reply_tasks.pop(pc_id, None)
                 if task:
                     task.cancel()

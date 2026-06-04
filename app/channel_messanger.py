@@ -2,40 +2,64 @@ import asyncio
 import logging
 import json
 
+from collections.abc import Mapping
+from typing import Dict, Any
 from httpx import AsyncClient, Timeout
+
+from piper import PiperVoice
+from aiortc import RTCDataChannel
 
 logger = logging.getLogger(__name__)
 
+def is_reply_active(pc_id: str, peer_reply_epoch: Dict[str, int], epoch: int) -> bool:
+    return peer_reply_epoch.get(pc_id) == epoch
 
-def send_chatbot_data_channel(dc, voice_model, chatbot_message: str, first_chunk: bool = False) -> None:
-    """Send audio metadata as JSON and PCM chunks as bytes over the DataChannel."""
+def send_message_to_data_channel(data_channel: RTCDataChannel, message: Mapping[str, Any] | bytes) -> None:
     try:
-        if getattr(dc, "readyState", None) == "open":
-            for chunk in voice_model.synthesize(chatbot_message):
-                if first_chunk:
-                    # send chunks metadata
-                    dc.send(
-                        json.dumps({
-                            "type": "audio_start",
-                            "sample_rate": chunk.sample_rate,
-                            "channels": chunk.sample_channels,
-                            "sample_width": chunk.sample_width
-                        })
-                    )
-                    first_chunk = False
-                dc.send(chunk.audio_int16_bytes)
-            logger.info("Sent chatbot reply via DataChannel (%d chars)", len(chatbot_message))
+        if getattr(data_channel, "readyState", None) == "open":
+            if isinstance(message, bytes):
+                data_channel.send(message)
+            else:
+                data_channel.send(json.dumps(message))
         else:
-            logger.warning(
-                "DataChannel not open (readyState=%s); reply not sent",
-                getattr(dc, "readyState", None),
-            )
+            logger.warning("DataChannel not open (readyState=%s); message not sent", getattr(data_channel, "readyState", None))
     except Exception as e:
         logger.warning("DataChannel send failed: %s", e)
 
+
+def send_chatbot_data_channel(
+    data_channel: RTCDataChannel,
+    voice_model: PiperVoice,
+    chatbot_message: str,
+    first_chunk: bool = False,
+    pc_id: str = None,
+    peer_reply_epoch: Dict[str, int] = None,
+    epoch: int = 0,
+) -> Dict[str, str]:
+    """Send audio metadata as JSON and PCM chunks as bytes over the DataChannel."""
+    for chunk in voice_model.synthesize(chatbot_message):
+        if not is_reply_active(pc_id, peer_reply_epoch, epoch):
+            return {"type": "audio_abort"}
+        if first_chunk:
+            # send chunks metadata
+            send_message_to_data_channel(
+                data_channel,
+                {
+                    "type": "audio_start",
+                    "sample_rate": chunk.sample_rate,
+                    "channels": chunk.sample_channels,
+                    "sample_width": chunk.sample_width
+                }
+            )
+            first_chunk = False
+        send_message_to_data_channel(data_channel, chunk.audio_int16_bytes)
+    logger.info("Sent chatbot reply via DataChannel (%d chars)", len(chatbot_message))
+    return {"type": "sentence_done"}
+
+
 async def fetch_chat_and_reply(
     pc_id: str,
-    dc: object,
+    data_channel: RTCDataChannel,
     voice_model,
     async_requests_client: AsyncClient,
     peer_stt_flush_request: dict[str, asyncio.Event],
@@ -44,6 +68,8 @@ async def fetch_chat_and_reply(
     peer_transcripts: dict[str, str],
     chat_upstream_read_timeout: float,
     peer_reply_tasks: dict[str, asyncio.Task],
+    peer_reply_epoch: Dict[str, int],
+    epoch: int = 0,
 ) -> None:
     """GET sentence chunks from upstream chat and stream synthesized audio."""
     try:
@@ -60,8 +86,13 @@ async def fetch_chat_and_reply(
             finally:
                 peer_stt_flush_complete.pop(pc_id, None)
 
+        if not is_reply_active(pc_id, peer_reply_epoch, epoch):
+            logger.info("Audio abort for session %s", pc_id)
+            send_message_to_data_channel(data_channel, {"type": "audio_abort"})
+            return
+
         transcript = peer_transcripts.get(pc_id, "").strip()
-        logger.info("stop_audio signal [%s]; transcript length=%d", pc_id, len(transcript))
+        logger.info("resume_audio signal [%s]; transcript length=%d", pc_id, len(transcript))
         CHAT_UPSTREAM_TIMEOUT = Timeout(
             connect=10.0,
             read=chat_upstream_read_timeout,
@@ -78,17 +109,40 @@ async def fetch_chat_and_reply(
                 res.raise_for_status()
 
                 first_chunk = True
-
+                reset_transcript = False
+                audio_abort = False
                 # /chat streams one sentence per line, so synthesize each sentence once.
                 async for sentence in res.aiter_lines():
+                    if not is_reply_active(pc_id, peer_reply_epoch, epoch):
+                        logger.info("Audio abort for session %s", pc_id)
+                        send_message_to_data_channel(data_channel, {"type": "audio_abort"})
+                        audio_abort = True
+                        break
                     sentence = sentence.strip()
                     if sentence:
-                        send_chatbot_data_channel(dc, voice_model, sentence, first_chunk)
+                        logger.info("sending sentence: %s", sentence)
+                        result = send_chatbot_data_channel(
+                            data_channel,
+                            voice_model,
+                            sentence,
+                            first_chunk,
+                            pc_id,
+                            peer_reply_epoch,
+                            epoch,
+                        )
+                        if result.get("type") == "audio_abort" or result.get("type") == "error":
+                            logger.info("Audio abort for session %s", pc_id)
+                            send_message_to_data_channel(data_channel, {"type": "audio_abort"})
+                            audio_abort = True
+                            break
+                        send_message_to_data_channel(data_channel, {"type": "sentence_audio_end"})
                         first_chunk = False
-                if getattr(dc, "readyState", None) == "open":
-                    dc.send(json.dumps({"type": "audio_end"}))
+                if not audio_abort:
+                    send_message_to_data_channel(data_channel, {"type": "audio_end"})
+                    reset_transcript = True
 
-            peer_transcripts[pc_id] = ""
+            if reset_transcript:
+                peer_transcripts[pc_id] = ""
         except Exception:
             logger.exception("Chat fetch failed for session %s", pc_id)
     except asyncio.CancelledError:
