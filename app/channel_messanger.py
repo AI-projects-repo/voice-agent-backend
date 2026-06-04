@@ -120,6 +120,7 @@ async def fetch_chat_and_reply(
                         break
                     sentence = sentence.strip()
                     if sentence:
+                        logger.info("sending sentence: %s", sentence)
                         result = send_chatbot_data_channel(
                             data_channel,
                             voice_model,
@@ -134,6 +135,7 @@ async def fetch_chat_and_reply(
                             send_message_to_data_channel(data_channel, {"type": "audio_abort"})
                             audio_abort = True
                             break
+                        send_message_to_data_channel(data_channel, {"type": "sentence_audio_end"})
                         first_chunk = False
                 if not audio_abort:
                     send_message_to_data_channel(data_channel, {"type": "audio_end"})
